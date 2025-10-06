@@ -1,0 +1,17 @@
+:root{--bg:#f6f7fb;--card:#fff;--accent:#0b84ff}
+body{font-family:Inter,Roboto,Arial,sans-serif;margin:0;background:var(--bg);color:#222}
+header{background:linear-gradient(90deg,#0b84ff,#4db6ff);color:white;padding:18px 16px}
+header h1{margin:0;font-size:18px}
+.container{padding:12px}
+.tabs{display:flex;gap:8px;margin-bottom:12px}
+.tab{flex:1;text-align:center;padding:10px;border-radius:10px;background:white;box-shadow:0 6px 18px rgba(2,6,23,0.06);cursor:pointer}
+.tab.active{outline:3px solid rgba(11,132,255,0.12)}
+.card{background:var(--card);border-radius:12px;padding:12px;margin-bottom:10px;box-shadow:0 6px 18px rgba(2,6,23,0.06)}
+.dish-title{display:flex;justify-content:space-between;align-items:center}
+.dish-desc{font-size:13px;color:#555;margin-top:6px}
+.small{font-size:13px;color:#666}
+.btn{display:inline-block;padding:8px 12px;border-radius:10px;background:var(--accent);color:white;text-decoration:none}
+label{display:block;margin-top:10px;font-size:14px}
+input,textarea,select{width:100%;padding:8px;border-radius:8px;border:1px solid #e6e9ef;margin-top:6px}
+footer{height:72px}
+.muted{color:#888;font-size:13px;margin-top:6px}

@@ -1,247 +1,299 @@
+# main.py
 import logging
-import sqlite3
+import json
+from datetime import datetime
+import aiosqlite
 from telegram import (
     Update,
     InlineKeyboardButton,
-    InlineKeyboardMarkup
+    InlineKeyboardMarkup,
+    WebAppInfo,
 )
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes,
-    MessageHandler,
     CallbackQueryHandler,
-    ConversationHandler,
-    filters
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
 
-# ========== НАСТРОЙКИ ==========
-BOT_TOKEN = "8376106425:AAFj2QKo7qK5zqvbGbhE_whIbUngY8S9r10"
-ADMIN_CHAT_ID = 123456789  # id вашего аккаунта или группы
+# ========== Настройки ==========
+BOT_TOKEN = "8376106425:AAFj2QKo7qK5zqvbGbhE_whIbUngY8S9r10"            # <- вставь свой токен от BotFather
+ADMIN_CHAT_ID = 123456789                   # <- сюда будут приходить уведомления о бронях (ваш id или группа)
 DB_PATH = "restaurant_bot.db"
+# Укажи сюда публичный URL где лежит твой webapp (index.html, script.js, style.css).
+# Пример для GitHub Pages: "https://username.github.io/repo-name"
+WEBAPP_BASE_URL = "https://N1kLeS.github.io/Bot_TG"  # <- обнови перед деплоем
 
-# ========== ЛОГИ ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========== СОСТОЯНИЯ ==========
-(
-    REG_NAME,
-    REG_PHONE,
-    CHOOSE_RESTAURANT,
-) = range(3)
+# ========== Инициализация и миграции базы ==========
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                phone TEXT,
+                restaurant TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS restaurants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                description TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bookings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                restaurant TEXT,
+                type TEXT,            -- 'book_dish' или 'booking_form'
+                payload TEXT,         -- json payload
+                created_at TEXT
+            )
+        """)
+        await db.commit()
 
-# ========== ИНИЦИАЛИЗАЦИЯ БД ==========
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    # пользователи
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        full_name TEXT,
-        phone TEXT,
-        restaurant_id INTEGER
-    )
-    """)
-    # рестораны
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS restaurants (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        description TEXT
-    )
-    """)
-    conn.commit()
+        # добавим пример ресторанов, если пусто
+        async with db.execute("SELECT COUNT(*) FROM restaurants") as cur:
+            row = await cur.fetchone()
+            if row and row[0] == 0:
+                sample = [
+                    ("Lemon Place", "Итальянская и средиземноморская кухня"),
+                    ("Sushi Bar", "Свежие роллы и сашими"),
+                    ("Steak House", "Стейки и гриль")
+                ]
+                await db.executemany("INSERT INTO restaurants (name, description) VALUES (?,?)", sample)
+                await db.commit()
 
-    # если нет ресторанов — добавим тестовые
-    cur.execute("SELECT COUNT(*) FROM restaurants")
-    if cur.fetchone()[0] == 0:
-        restaurants = [
-            ("La Tavola", "Итальянский ресторан с домашней пастой и вином"),
-            ("Sakura", "Японская кухня, суши, роллы и тепаньяки"),
-            ("Grill House", "Стейки и бургеры на открытом огне")
-        ]
-        cur.executemany("INSERT INTO restaurants (name, description) VALUES (?,?)", restaurants)
-        conn.commit()
+# ========== Вспомогательные функции ==========
+async def get_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id, username, full_name, phone, restaurant FROM users WHERE user_id=?", (user_id,)) as cur:
+            return await cur.fetchone()
 
-    conn.close()
-
-# ========== ХЕНДЛЕРЫ ==========
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT full_name, phone, restaurant_id FROM users WHERE user_id=?", (user_id,))
-    user = cur.fetchone()
-    conn.close()
-
-    if user is None:
-        await update.message.reply_text("👋 Привет! Давайте зарегистрируемся.\nВведите ваше имя:")
-        return REG_NAME
-    elif user[2] is None:
-        await show_restaurant_choice(update, context)
-        return CHOOSE_RESTAURANT
-    else:
-        await show_main_menu(update, context)
-        return ConversationHandler.END
-
-
-# === Регистрация ===
-async def reg_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = update.message.text.strip()
-    context.user_data["name"] = name
-    await update.message.reply_text("📱 Отлично! Теперь введите ваш телефон (в формате +7XXXXXXXXXX):")
-    return REG_PHONE
-
-async def reg_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
-    user_id = update.effective_user.id
-    name = context.user_data["name"]
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO users (user_id, full_name, phone) VALUES (?,?,?)",
-                (user_id, name, phone))
-    conn.commit()
-    conn.close()
-
-    await update.message.reply_text("✅ Регистрация завершена!")
-    await show_restaurant_choice(update, context)
-    return CHOOSE_RESTAURANT
-
-
-# === Выбор ресторана ===
-async def show_restaurant_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT id, name FROM restaurants")
-    items = cur.fetchall()
-    conn.close()
-
-    buttons = [[InlineKeyboardButton(name, callback_data=f"rest|{rid}")] for rid, name in items]
-    await update.message.reply_text("🏢 Выберите ресторан:", reply_markup=InlineKeyboardMarkup(buttons))
-
-async def restaurant_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data.split("|")
-    rest_id = int(data[1])
-    user_id = query.from_user.id
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET restaurant_id=? WHERE user_id=?", (rest_id, user_id))
-    conn.commit()
-    # получим название ресторана
-    cur.execute("SELECT name FROM restaurants WHERE id=?", (rest_id,))
-    rest_name = cur.fetchone()[0]
-    conn.close()
-
-    await query.message.reply_text(f"🍷 Отлично! Вы выбрали ресторан *{rest_name}*.", parse_mode="Markdown")
-    await show_main_menu(update, context)
-    return ConversationHandler.END
-
-
-# === Главное меню ===
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🍽 Меню", callback_data="menu")],
-        [InlineKeyboardButton("📅 Бронь", callback_data="booking")],
-        [InlineKeyboardButton("ℹ️ О ресторане", callback_data="about")],
-        [InlineKeyboardButton("⭐ Мой профиль", callback_data="profile")]
-    ]
-    if update.message:
-        await update.message.reply_text("Главное меню:", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.callback_query.message.reply_text("Главное меню:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-# === Обработчики кнопок главного меню (пока заглушки) ===
-async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text("🍝 Здесь будет меню ресторана (в следующей версии).")
-
-async def booking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text("📅 Здесь будет бронь столика (в следующей версии).")
-
-async def about_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT r.name, r.description 
-        FROM users u
-        JOIN restaurants r ON u.restaurant_id = r.id
-        WHERE u.user_id = ?
-    """, (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    if row:
-        name, desc = row
-        await query.message.reply_text(f"ℹ️ *{name}*\n{desc}", parse_mode="Markdown")
-    else:
-        await query.message.reply_text("Ресторан не выбран.")
-
-async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    user_id = update.callback_query.from_user.id
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT full_name, phone, r.name 
-        FROM users u
-        LEFT JOIN restaurants r ON u.restaurant_id = r.id
-        WHERE u.user_id=?
-    """, (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    if row:
-        name, phone, rest = row
-        await update.callback_query.message.reply_text(
-            f"👤 *{name}*\n📱 {phone}\n🏢 Ресторан: {rest or 'не выбран'}",
-            parse_mode="Markdown"
+async def ensure_user_exists(user):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?,?,?)",
+            (user.id, user.username, user.full_name)
         )
+        await db.commit()
+
+async def get_restaurants():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT name, description FROM restaurants") as cur:
+            return await cur.fetchall()
+
+# ========== Хендлеры ==========
+
+# /start — регистрация + переход в главное меню
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await init_db()
+    user = update.effective_user
+    await ensure_user_exists(user)
+    # Если пришёл обычный message
+    if update.message:
+        await show_main_menu(update)
     else:
-        await update.callback_query.message.reply_text("Профиль не найден.")
+        # возможно callback
+        await show_main_menu(update)
 
+# Главное меню
+async def show_main_menu(update: Update, text: str = "Главное меню:"):
+    keyboard = [
+        [InlineKeyboardButton("📋 Профиль", callback_data="profile")],
+        [InlineKeyboardButton("🍴 Выбрать ресторан", callback_data="choose_restaurant")],
+        [InlineKeyboardButton("📖 Меню ресторана", callback_data="open_menu")],
+        [InlineKeyboardButton("🕰 Забронировать столик", callback_data="open_booking")],
+        [InlineKeyboardButton("ℹ️ О ресторане", callback_data="about")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-# === Отмена ===
+    # edit_message_text если callback, иначе send message
+    if update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(text=text, reply_markup=reply_markup)
+        except Exception:
+            # если редактирование не получилось (например, старое сообщение), просто отправим новое
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+
+# Профиль
+async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    row = await get_user(user_id)
+    if row:
+        _, username, full_name, phone, restaurant = row
+        text = f"👤 Профиль:\n\nИмя: {full_name or '-'}\nЮзер: @{username}\nТелефон: {phone or 'не указан'}\nВыбранный ресторан: {restaurant or 'не выбран'}"
+    else:
+        text = "Профиль не найден."
+    keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+# Выбор ресторана (список)
+async def choose_restaurant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    rows = await get_restaurants()
+    keyboard = [[InlineKeyboardButton(name, callback_data=f"set_rest|{name}")] for (name, _) in rows]
+    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")])
+    await query.edit_message_text("🏢 Выберите ресторан:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# Сохранение выбора ресторана
+async def set_restaurant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data.split("|", 1)
+    if len(data) < 2:
+        await query.edit_message_text("Ошибка выбора ресторана.")
+        return
+    rest_name = data[1]
+    user_id = query.from_user.id
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET restaurant = ? WHERE user_id = ?", (rest_name, user_id))
+        await db.commit()
+    await show_main_menu(update, f"✅ Вы выбрали ресторан: {rest_name}")
+
+# О ресторане (описание текущего выбранного)
+async def about_restaurant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    row = await get_user(user_id)
+    restaurant = row[4] if row else None
+    if not restaurant:
+        await query.edit_message_text("⚠️ Сначала выберите ресторан.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]))
+        return
+    # можно подтянуть описание из таблицы restaurants, но пока короткий текст
+    text = f"ℹ️ Информация о ресторане *{restaurant}*.\nУютная атмосфера и вкусная еда."
+    keyboard = [[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]
+    await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+# Открыть WebApp: меню
+async def open_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    row = await get_user(user_id)
+    restaurant = row[4] if row else None
+    if not restaurant:
+        await query.edit_message_text("⚠️ Сначала выберите ресторан.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]))
+        return
+    # URL веб-приложения — index.html?restaurant=...
+    url = f"{WEBAPP_BASE_URL}/index.html?restaurant={restaurant}"
+    keyboard = [
+        [InlineKeyboardButton("🍽 Открыть меню", web_app=WebAppInfo(url=url))],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+    ]
+    await query.edit_message_text(f"Меню ресторана *{restaurant}*:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+# Открыть WebApp: бронирование
+async def open_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    row = await get_user(user_id)
+    restaurant = row[4] if row else None
+    if not restaurant:
+        await query.edit_message_text("⚠️ Сначала выберите ресторан.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]]))
+        return
+    url = f"{WEBAPP_BASE_URL}/index.html?restaurant={restaurant}#booking"
+    keyboard = [
+        [InlineKeyboardButton("📅 Забронировать", web_app=WebAppInfo(url=url))],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+    ]
+    await query.edit_message_text(f"Бронирование в *{restaurant}*:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+# Обработчик callback-кнопок
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+    if data == "profile":
+        await show_profile(update, context)
+    elif data == "choose_restaurant":
+        await choose_restaurant(update, context)
+    elif data.startswith("set_rest|"):
+        await set_restaurant(update, context)
+    elif data == "open_menu":
+        await open_menu(update, context)
+    elif data == "open_booking":
+        await open_booking(update, context)
+    elif data == "about":
+        await about_restaurant(update, context)
+    elif data == "main_menu":
+        await show_main_menu(update)
+    else:
+        await update.callback_query.answer("Неизвестная кнопка")
+
+# Обработка данных от WebApp (tg.sendData)
+async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg or not getattr(msg, "web_app_data", None):
+        return
+    data_raw = msg.web_app_data.data  # JSON строка, присланная script.js
+    try:
+        payload = json.loads(data_raw)
+    except Exception as e:
+        logger.exception("Невозможно распарсить web_app_data")
+        await msg.reply_text("Ошибка: неверный формат данных от WebApp.")
+        return
+
+    user = update.effective_user
+    restaurant = payload.get("restaurant")
+    action = payload.get("action")
+    data = payload.get("data")
+
+    # Сохраним бронь в БД
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO bookings (user_id, restaurant, type, payload, created_at) VALUES (?,?,?,?,?)",
+            (user.id, restaurant, action, json.dumps(data, ensure_ascii=False), datetime.utcnow().isoformat())
+        )
+        await db.commit()
+        # найдём id последней вставки
+        async with db.execute("SELECT last_insert_rowid()") as cur:
+            row = await cur.fetchone()
+            booking_id = row[0] if row else None
+
+    # Отправим админу уведомление
+    admin_text = f"Новая WebApp бронь #{booking_id}\nПользователь: {user.full_name or user.username} ({user.id})\nРесторан: {restaurant}\nДействие: {action}\nДанные: {json.dumps(data, ensure_ascii=False)}"
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text)
+    except Exception as e:
+        logger.warning("Не удалось отправить сообщение админу: %s", e)
+
+    # Ответим пользователю
+    await msg.reply_text("✅ Ваш запрос получен. Спасибо! Мы свяжемся с вами для подтверждения.")
+
+# Команда /cancel (на случай разговоров)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено.")
-    return ConversationHandler.END
+    if update.message:
+        await update.message.reply_text("Отменено.")
+    elif update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Отменено.")
 
-
-# ========== MAIN ==========
+# ========== Запуск приложения ==========
 def main():
-    init_db()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            REG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_name)],
-            REG_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_phone)],
-            CHOOSE_RESTAURANT: [CallbackQueryHandler(restaurant_chosen, pattern="^rest\\|")]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    )
-    app.add_handler(conv)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_webapp_data))
+    app.add_handler(CommandHandler("cancel", cancel))
 
-    # кнопки главного меню
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu$"))
-    app.add_handler(CallbackQueryHandler(booking_callback, pattern="^booking$"))
-    app.add_handler(CallbackQueryHandler(about_callback, pattern="^about$"))
-    app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile$"))
-
-    logger.info("Бот запущен...")
+    logger.info("Bot starting...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()

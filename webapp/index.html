@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Меню ресторана — WebApp</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header>
+<h1 id="restaurant-title">🍽 Ресторан</h1>
+<div class="small" id="restaurant-sub">Загружаем...</div>
+</header>
+
+<div class="container">
+<div class="tabs">
+<div class="tab active" data-tab="menu">Меню</div>
+<div class="tab" data-tab="booking">Бронирование</div>
+<div class="tab" data-tab="about">О ресторане</div>
+</div>
+
+<div id="content"></div>
+<div class="muted">Данные из WebApp отправляются боту при нажатии на кнопку внизу.</div>
+</div>
+
+<footer></footer>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
